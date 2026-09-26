@@ -24,6 +24,72 @@ def candidate_install_dirs() -> list[Path]:
     ]
 
 
+INSTALL_TARGETS: dict[str, dict] = {
+    "steam": {
+        "label": "Steam",
+        "hint": "compatibilitytools.d — выбор в настройках Steam → Совместимость",
+        "candidates": lambda home: [
+            home / ".steam/root/compatibilitytools.d",
+            home / ".local/share/Steam/compatibilitytools.d",
+            home / ".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d",
+            home / ".steam/steam/compatibilitytools.d",
+        ],
+    },
+    "lutris-wine": {
+        "label": "Lutris (Wine)",
+        "hint": "раннеры Wine — выбор в игре → Configure → Runner options",
+        "candidates": lambda home: [
+            home / ".local/share/lutris/runners/wine",
+            home / ".var/app/net.lutris.Lutris/data/lutris/runners/wine",  # flatpak
+        ],
+    },
+    "lutris-proton": {
+        "label": "Lutris (Proton)",
+        "hint": "раннеры Proton (Lutris 5.18+) — Preferences → Runners",
+        "candidates": lambda home: [
+            home / ".local/share/lutris/runners/proton",
+            home / ".var/app/net.lutris.Lutris/data/lutris/runners/proton",  # flatpak
+        ],
+    },
+    "bottles": {
+        "label": "Bottles",
+        "hint": "раннеры — выбор в Preferences → Runners",
+        "candidates": lambda home: [
+            home / ".local/share/bottles/runners",
+            home / ".var/app/com.usebottles.bottles/data/bottles/runners",  # flatpak
+        ],
+    },
+}
+
+
+def target_ids() -> list[str]:
+    return list(INSTALL_TARGETS.keys())
+
+
+def target_label(tid: str) -> str:
+    return INSTALL_TARGETS.get(tid, {}).get("label", tid)
+
+
+def candidate_dirs_for_target(tid: str) -> list[Path]:
+    home = Path.home()
+    cfg = INSTALL_TARGETS.get(tid)
+    if cfg is None:
+        raise ValueError(f"Неизвестная цель: {tid} ({', '.join(target_ids())})")
+    return [p for p in cfg["candidates"](home)]
+
+
+def default_dir_for_target(tid: str) -> Path:
+    """Первая существующая папка цели, иначе первая из кандидатов (без создания)."""
+    for p in candidate_dirs_for_target(tid):
+        if p.exists():
+            return p
+    return candidate_dirs_for_target(tid)[0]
+
+
+def target_hint(tid: str) -> str:
+    return INSTALL_TARGETS.get(tid, {}).get("hint", "")
+
+
 def default_install_dir() -> Path:
     for p in candidate_install_dirs():
         if p.exists():

@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (
 from downloader import DownloadCancelled, download, fetch_expected_sha512, verify_sha512
 from fetcher import SOURCES, fetch_all, load_cached_releases
 from installer import (
-    InstallCancelled, cleanup_archive, default_install_dir, dir_size, extract_archive,
+    InstallCancelled, cleanup_archive, default_dir_for_target, dir_size, extract_archive,
     installed_total_size, list_installed, prune_old_builds, remove_build,
+    target_hint, target_ids, target_label,
 )
 from settings import load_settings, save_settings
 from sources import Release
@@ -232,10 +233,23 @@ class MainWindow(QMainWindow):
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.currentRowChanged.connect(self.rebuild_cards)
         side_layout.addWidget(self.sidebar, 1)
-        # install dir row (compact, in sidebar bottom)
-        side_layout.addWidget(QLabel("Установка в:"))
+        # install target + dir (compact, in sidebar bottom)
+        side_layout.addWidget(QLabel("Ставить в:"))
+        self.target_combo = QComboBox()
+        for tid in target_ids():
+            self.target_combo.addItem(target_label(tid), tid)
+        saved_target = load_settings().get("target", "steam")
+        if saved_target not in target_ids():
+            saved_target = "steam"
+        self.target_combo.setCurrentIndex(target_ids().index(saved_target))
+        self.target_combo.currentIndexChanged.connect(self.on_target_changed)
+        side_layout.addWidget(self.target_combo)
+        self.target_hint = QLabel(target_hint(saved_target))
+        self.target_hint.setObjectName("CardMeta")
+        self.target_hint.setWordWrap(True)
+        side_layout.addWidget(self.target_hint)
         dir_row = QHBoxLayout()
-        self.dir_edit = QLineEdit(str(default_install_dir()))
+        self.dir_edit = QLineEdit(str(default_dir_for_target(saved_target)))
         self.dir_edit.textChanged.connect(self.reload_installed)
         dir_row.addWidget(self.dir_edit, 1)
         browse = QPushButton("…")
@@ -373,6 +387,19 @@ class MainWindow(QMainWindow):
                 0, QLabel("Ничего не найдено. Обновите список или измените поиск."))
 
     # --- install dir ---
+    def current_target(self) -> str:
+        tid = self.target_combo.currentData()
+        return tid if tid in target_ids() else "steam"
+
+    def on_target_changed(self):
+        tid = self.current_target()
+        self.target_hint.setText(target_hint(tid))
+        self.dir_edit.setText(str(default_dir_for_target(tid)))
+        s = load_settings()
+        s["target"] = tid
+        save_settings(s)
+        self.reload_installed()
+
     def browse_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Папка установки")
         if d:
@@ -491,8 +518,12 @@ class MainWindow(QMainWindow):
         if pruned:
             msg += f" (удалено старых: {len(pruned)})"
         self.statusbar.showMessage(msg)
-        QMessageBox.information(self, "Готово",
-                                f"Установлено в:\n{target}\n\nПерезапустите Steam.")
+        msg = f"Установлено в:\n{target}\n\n"
+        if self.current_target() == "steam":
+            msg += "Перезапустите Steam."
+        else:
+            msg += target_hint(self.current_target())
+        QMessageBox.information(self, "Готово", msg)
         self.reload_installed()
 
     def on_install_failed(self, err: str):

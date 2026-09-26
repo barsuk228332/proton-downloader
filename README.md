@@ -99,21 +99,33 @@ python3 -m venv .venv
 # установить по прямой ссылке на архив
 .venv/bin/python main.py --cli-install-url https://example.com/foo.tar.xz ~/my-protons
 
+# установить в Lutris или Bottles вместо Steam
+.venv/bin/python main.py --cli-install GE-Proton11-7 --target lutris-wine
+.venv/bin/python main.py --cli-install GE-Proton11-7 --target bottles
+
 # оставить N самых новых сборок, остальные удалить
 .venv/bin/python main.py --cli-prune 3
 .venv/bin/python main.py --cli-prune ~/my-protons 3
+.venv/bin/python main.py --cli-prune --target bottles 3
 ```
 
 ## 📁 Куда ставится
 
-Программа ищет первую существующую папку из списка:
+Цель выбирается в сайдбаре («Ставить в:») или флагом `--target` в CLI:
 
-- `~/.steam/root/compatibilitytools.d`
-- `~/.local/share/Steam/compatibilitytools.d`
-- `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d` (Flatpak)
-- `~/.steam/steam/compatibilitytools.d`
+| Цель | Папка |
+|------|-------|
+| **Steam** | `~/.steam/root/compatibilitytools.d` (или другие варианты, определяется сама) |
+| **Lutris (Wine)** | `~/.local/share/lutris/runners/wine` |
+| **Lutris (Proton)** | `~/.local/share/lutris/runners/proton` |
+| **Bottles** | `~/.local/share/bottles/runners` |
 
-Если ни одной нет — создаёт первую. В интерфейсе путь можно сменить вручную.
+Для каждой цели сначала ищется обычная папка, затем Flatpak-вариант
+(`~/.var/app/...`). Путь можно переписать вручную в поле под списком —
+установщик создаст его при необходимости. Подсказка под списком говорит,
+где выбрать сборку: для Steam — перезапустить клиент и зайти в
+`Настройки Steam → Совместимость`, для Lutris/Bottles — выбрать раннер
+в настройках игры или бутылки.
 
 ## ❓ Частые вопросы
 

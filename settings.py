@@ -31,6 +31,7 @@ DEFAULTS = {
     "keep_n": 0,  # 0 = не чистить автоматически
     "delete_archive_after_install": True,
     "auto_prune": False,
+    "target": "steam",  # steam | lutris-wine | lutris-proton | bottles
 }
 
 CACHE_TTL = 3600  # 1 час

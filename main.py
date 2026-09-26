@@ -19,15 +19,25 @@ def cli_list():
             print(f"  {r.tag}  {r.size // 1024 // 1024}MB  {r.url}")
 
 
-def _install_release(hit, dest: str | None, delete_archive: bool | None = None):
+def resolve_dest(dest: str | None, target: str | None) -> Path:
+    from installer import default_dir_for_target, default_install_dir
+    if dest:
+        return Path(dest).expanduser()
+    if target:
+        return default_dir_for_target(target)
+    return default_install_dir()
+
+
+def _install_release(hit, dest: str | None, delete_archive: bool | None = None,
+                     target_id: str | None = None):
     from downloader import download, fetch_expected_sha512, verify_sha512
-    from installer import cleanup_archive, default_install_dir, extract_archive, prune_old_builds
+    from installer import cleanup_archive, extract_archive, prune_old_builds, target_hint
     from settings import load_settings
     s = load_settings()
     if delete_archive is None:
         delete_archive = bool(s.get("delete_archive_after_install", True))
     keep_n = int(s.get("keep_n", 0))
-    install_dir = Path(dest).expanduser() if dest else default_install_dir()
+    install_dir = resolve_dest(dest, target_id)
     tmp = Path(tempfile.gettempdir()) / "proton-downloader" / hit.url.split("/")[-1].split("?")[0]
     print(f"Скачивание {hit.url} ... (докачка включена)")
 
@@ -45,8 +55,10 @@ def _install_release(hit, dest: str | None, delete_archive: bool | None = None):
         exp = fetch_expected_sha512(hit.checksum_url)
         if exp:
             print("Проверка SHA512...", "OK" if verify_sha512(tmp, exp) else "FAIL")
-    target = extract_archive(tmp, install_dir)
-    print(f"Установлено в {target}. Перезапустите Steam.")
+    installed = extract_archive(tmp, install_dir)
+    print(f"Установлено в {installed}.")
+    tid = target_id or "steam"
+    print(target_hint(tid) if tid != "steam" else "Перезапустите Steam.")
     if delete_archive:
         cleanup_archive(tmp)
         print("Архив удалён.")
@@ -56,7 +68,7 @@ def _install_release(hit, dest: str | None, delete_archive: bool | None = None):
             print(f"Удалено старых сборок ({len(pruned)}): {', '.join(pruned)}")
 
 
-def cli_install(tag: str, dest: str | None):
+def cli_install(tag: str, dest: str | None, target_id: str | None = None):
     from fetcher import fetch_all
     data = fetch_all(30)
     all_rels = [r for v in data.values() for r in v]
@@ -66,10 +78,10 @@ def cli_install(tag: str, dest: str | None):
         for r in all_rels[:5]:
             print(" ", r.tag)
         sys.exit(1)
-    _install_release(hit, dest)
+    _install_release(hit, dest, target_id=target_id)
 
 
-def cli_install_url(url: str, dest: str | None):
+def cli_install_url(url: str, dest: str | None, target_id: str | None = None):
     from sources import Release
     fname = url.split("/")[-1].split("?")[0]
     if not fname.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
@@ -82,13 +94,13 @@ def cli_install_url(url: str, dest: str | None):
             break
     hit = Release(source="URL", tag=tag, name=tag, url=url, size=0,
                   checksum_url=None, published_at="", body="")
-    _install_release(hit, dest)
+    _install_release(hit, dest, target_id=target_id)
 
 
-def cli_prune(dest: str | None, keep: str | None = None):
-    from installer import default_install_dir, list_installed, prune_old_builds
+def cli_prune(dest: str | None, keep: str | None = None, target_id: str | None = None):
+    from installer import list_installed, prune_old_builds
     from settings import load_settings
-    install_dir = Path(dest).expanduser() if dest else default_install_dir()
+    install_dir = resolve_dest(dest, target_id)
     n = int(keep) if keep else int(load_settings().get("keep_n", 0))
     if n <= 0:
         print("Укажите N: --cli-prune [dir] <N> или задайте keep_n в настройках")
@@ -102,23 +114,48 @@ def cli_prune(dest: str | None, keep: str | None = None):
 def print_help():
     print("Использование:")
     print("  main.py [--cli-list | --cli-install TAG [DIR] | --cli-install-url URL [DIR] | --cli-prune [DIR] [N]]")
+    print("  Общий флаг: --target steam|lutris-wine|lutris-proton|bottles (вместо DIR)")
+    print("  Примеры:")
+    print("    main.py --cli-install GE-Proton11-7 --target lutris-wine")
+    print("    main.py --cli-install-url https://example.com/foo.tar.xz --target bottles")
+
+
+def _pop_target_arg(argv: list[str]) -> tuple[list[str], str | None]:
+    """Вытащить '--target X' из argv. Возвращает (очищенный argv, target)."""
+    target = None
+    out = [argv[0]]
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--target" and i + 1 < len(argv):
+            target = argv[i + 1]
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    return out, target
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--cli-list":
+    argv, target_id = _pop_target_arg(sys.argv)
+    if target_id:
+        from installer import target_ids
+        if target_id not in target_ids():
+            print(f"Неизвестная цель: {target_id} ({', '.join(target_ids())})")
+            sys.exit(1)
+    if len(argv) > 1 and argv[1] == "--cli-list":
         cli_list()
-    elif len(sys.argv) > 2 and sys.argv[1] == "--cli-install":
-        cli_install(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
-    elif len(sys.argv) > 2 and sys.argv[1] == "--cli-install-url":
-        cli_install_url(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
-    elif len(sys.argv) > 1 and sys.argv[1] == "--cli-prune":
-        rest = sys.argv[2:]
+    elif len(argv) > 2 and argv[1] == "--cli-install":
+        cli_install(argv[2], argv[3] if len(argv) > 3 else None, target_id)
+    elif len(argv) > 2 and argv[1] == "--cli-install-url":
+        cli_install_url(argv[2], argv[3] if len(argv) > 3 else None, target_id)
+    elif len(argv) > 1 and argv[1] == "--cli-prune":
+        rest = argv[2:]
         dest = rest[0] if rest and not rest[0].isdigit() else None
         keep = next((a for a in rest if a.isdigit()), None)
         if dest is None and keep is None and rest:
             pass
-        cli_prune(dest, keep)
-    elif len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        cli_prune(dest, keep, target_id)
+    elif len(argv) > 1 and argv[1] in ("-h", "--help"):
         print_help()
     else:
         from gui import main as gui_main
