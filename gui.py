@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -27,18 +28,61 @@ from widgets import ReleaseCard
 SOURCE_NAMES = ["Все", *SOURCES.keys()]
 
 QSS = """
-#Sidebar { font-size: 14px; }
-#Sidebar::item { padding: 8px 10px; border-radius: 8px; }
-#Sidebar::item:selected { font-weight: bold; }
-#ReleaseCard { border: 1px solid palette(mid); border-radius: 10px; }
-#CardTitle { font-size: 15px; font-weight: bold; }
-#CardMeta { color: palette(placeholder-text); }
+QMainWindow, QWidget#qt_scrollarea_viewport { background: #282828; }
+#Sidebar { font-size: 14px; background: #282828; border: none; }
+#Sidebar::item { padding: 8px 10px; border-radius: 8px; color: #ebdbb2; }
+#Sidebar::item:selected { background: #504945; color: #b8bb26; font-weight: bold; }
+#Sidebar::item:hover:!selected { background: #3c3836; }
+#ReleaseCard { background: #3c3836; border: 1px solid #665c54; border-radius: 10px; }
+#CardTitle { font-size: 15px; font-weight: bold; color: #ebdbb2; }
+#CardMeta { color: #a89984; }
 #Badge_Latest, #Badge_Installed {
     border-radius: 8px; padding: 2px 10px; font-size: 12px; font-weight: bold;
 }
-#Badge_Latest { border: 1px solid palette(highlight); color: palette(highlight); }
-#Badge_Installed { border: 1px solid palette(mid); }
-#Search { padding: 6px 10px; border-radius: 8px; }
+#Badge_Latest { border: 1px solid #b8bb26; color: #b8bb26; background: #3c3836; }
+#Badge_Installed { border: 1px solid #8ec07c; color: #8ec07c; background: #3c3836; }
+#Search { padding: 6px 10px; border-radius: 8px; background: #3c3836; color: #ebdbb2; border: 1px solid #665c54; }
+#Search:focus { border: 1px solid #b8bb26; }
+QLineEdit, QComboBox, QSpinBox {
+    background: #3c3836; color: #ebdbb2;
+    border: 1px solid #665c54; border-radius: 6px; padding: 4px 8px;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #b8bb26; outline: none; }
+QComboBox { combobox-popup: 0; }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox::down-arrow { width: 12px; height: 12px; }
+QComboBox QAbstractItemView { background: #3c3836; color: #ebdbb2; selection-background-color: #504945; selection-color: #b8bb26; border: 1px solid #665c54; outline: none; }
+QSpinBox::up-button, QSpinBox::down-button { background: #504945; border: none; width: 18px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #665c54; }
+QSpinBox::up-arrow, QSpinBox::down-arrow { width: 10px; height: 10px; }
+QListView { outline: none; }
+QPushButton { min-height: 22px; }
+QPushButton {
+    background: #504945; color: #ebdbb2;
+    border: 1px solid #665c54; border-radius: 6px; padding: 5px 12px;
+}
+QPushButton:hover { border: 1px solid #b8bb26; }
+QPushButton:pressed { background: #665c54; }
+QPushButton:disabled { color: #a89984; }
+QPushButton:default { border: 1px solid #b8bb26; color: #fabd2f; }
+QProgressBar { background: #504945; border: 1px solid #665c54; border-radius: 6px; text-align: center; color: #ebdbb2; }
+QProgressBar::chunk { background: #b8bb26; border-radius: 4px; }
+QTextBrowser { background: #3c3836; color: #ebdbb2; border: 1px solid #665c54; }
+QScrollBar:vertical { background: #282828; width: 12px; border: none; }
+QScrollBar::handle:vertical { background: #504945; border-radius: 6px; min-height: 20px; }
+QScrollBar::handle:vertical:hover { background: #665c54; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; background: none; border: none; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: #282828; border: none; }
+QScrollBar:horizontal { background: #282828; height: 12px; border: none; }
+QScrollBar::handle:horizontal { background: #504945; border-radius: 6px; min-width: 20px; }
+QScrollBar::handle:horizontal:hover { background: #665c54; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; background: none; border: none; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: #282828; border: none; }
+QAbstractScrollArea::corner { background: #282828; border: none; }
+QSplitter::handle { background: #665c54; }
+QStatusBar { color: #a89984; }
+QLabel { color: #ebdbb2; }
+a { color: #8ec07c; }
 """
 
 
@@ -231,6 +275,7 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(0, 0, 0, 0)
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFrameShape(QListWidget.NoFrame)
         self.sidebar.currentRowChanged.connect(self.rebuild_cards)
         side_layout.addWidget(self.sidebar, 1)
         # install target + dir (compact, in sidebar bottom)
@@ -278,6 +323,7 @@ class MainWindow(QMainWindow):
 
         # cards scroll area
         self.scroll = QScrollArea()
+        self.scroll.setFrameShape(QScrollArea.NoFrame)
         self.scroll.setWidgetResizable(True)
         self.cards_host = QWidget()
         self.cards_layout = QVBoxLayout(self.cards_host)
@@ -567,10 +613,34 @@ class MainWindow(QMainWindow):
         self.reload_installed()
 
 
+def gruvbox_palette() -> QPalette:
+    p = QPalette()
+    p.setColor(QPalette.Window, QColor("#282828"))
+    p.setColor(QPalette.WindowText, QColor("#ebdbb2"))
+    p.setColor(QPalette.Base, QColor("#3c3836"))
+    p.setColor(QPalette.AlternateBase, QColor("#504945"))
+    p.setColor(QPalette.Text, QColor("#ebdbb2"))
+    p.setColor(QPalette.PlaceholderText, QColor("#a89984"))
+    p.setColor(QPalette.Button, QColor("#504945"))
+    p.setColor(QPalette.ButtonText, QColor("#ebdbb2"))
+    p.setColor(QPalette.Mid, QColor("#665c54"))
+    p.setColor(QPalette.Dark, QColor("#3c3836"))
+    p.setColor(QPalette.Highlight, QColor("#b8bb26"))
+    p.setColor(QPalette.HighlightedText, QColor("#282828"))
+    p.setColor(QPalette.Link, QColor("#8ec07c"))
+    p.setColor(QPalette.ToolTipBase, QColor("#3c3836"))
+    p.setColor(QPalette.ToolTipText, QColor("#ebdbb2"))
+    disabled = QColor("#a89984")
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        p.setColor(QPalette.Disabled, role, disabled)
+    return p
+
+
 def main():
     import sys
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")  # системная палитра, нативный вид в light/dark
+    app.setStyle("Fusion")  # изолируемся от градиентов Breeze
+    app.setPalette(gruvbox_palette())
     app.setStyleSheet(QSS)
     w = MainWindow()
     w.show()
