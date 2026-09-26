@@ -97,6 +97,11 @@ def pick_cachyos_asset(assets: list[dict]) -> tuple[dict | None, dict | None]:
 
 
 def pick_dwproton_asset(assets: list[dict]) -> tuple[dict | None, dict | None]:
+    return pick_generic_tar_xz(assets)
+
+
+def pick_generic_tar_xz(assets: list[dict]) -> tuple[dict | None, dict | None]:
+    """First .tar.xz (skip .torrent). Checksum: .sha512sum/.sha512 (append or replace)."""
     archive = checksum = None
     for a in assets:
         n = a.get("name", "")
@@ -104,13 +109,82 @@ def pick_dwproton_asset(assets: list[dict]) -> tuple[dict | None, dict | None]:
             archive = a
             break
     if archive is not None:
-        want_sum = archive["name"] + ".sha512sum" if False else archive["name"].replace(".tar.xz", ".sha512sum")
-        # dwproton checksum name: dwproton-11.0-13-x86_64.sha512sum
+        cands = (archive["name"] + ".sha512sum", archive["name"] + ".sha512",
+                 archive["name"].replace(".tar.xz", ".sha512sum"),
+                 archive["name"].replace(".tar.xz", ".sha512"))
         for a in assets:
-            if a.get("name") == want_sum:
+            if a.get("name") in cands:
                 checksum = a
                 break
     return archive, checksum
+
+
+def pick_generic_tar_gz(assets: list[dict]) -> tuple[dict | None, dict | None]:
+    """First .tar.gz + matching .sha512sum (for GE-like sources, e.g. Sarek).
+
+    Sarek публикует обычный и async-вариант — предпочитаем обычный.
+    """
+    cands = [a for a in assets if a.get("name", "").endswith(".tar.gz")]
+    archive = None
+    for a in cands:
+        if "async" not in a["name"].lower():
+            archive = a
+            break
+    if archive is None and cands:
+        archive = cands[0]
+    checksum = None
+    if archive is not None:
+        for suffix in (archive["name"] + ".sha512sum",
+                       archive["name"].replace(".tar.gz", ".sha512sum")):
+            for a in assets:
+                if a.get("name") == suffix:
+                    checksum = a
+                    break
+            if checksum is not None:
+                break
+    return archive, checksum
+
+
+def pick_kron4ek_asset(assets: list[dict]) -> tuple[dict | None, dict | None]:
+    """Kron4ek/Wine-Builds: wine-proton-*-amd64-wow64.tar.xz (amd64 == x86_64).
+
+    Контрольных сумм per-file нет (только общий sha256sums.txt другого формата),
+    поэтому checksum всегда None — проверка пропускается.
+    """
+    m = _machine()
+    is_arm = m in ("aarch64", "arm64")
+    archive = None
+    if is_arm:
+        for a in assets:
+            n = a.get("name", "")
+            ln = n.lower()
+            if n.endswith(".tar.xz") and "proton" in ln and ("aarch64" in ln or "arm64" in ln):
+                archive = a
+                break
+    else:
+        # предпочесть wow64-сборку, затем обычную amd64 (=x86_64)
+        for a in assets:
+            n = a.get("name", "")
+            ln = n.lower()
+            if n.endswith(".tar.xz") and "proton" in ln and "wow64" in ln \
+                    and ("amd64" in ln or "x86_64" in ln):
+                archive = a
+                break
+        if archive is None:
+            for a in assets:
+                n = a.get("name", "")
+                ln = n.lower()
+                if n.endswith(".tar.xz") and "proton" in ln \
+                        and ("amd64" in ln or "x86_64" in ln):
+                    archive = a
+                    break
+    if archive is None:  # fallback: любой proton tar.xz
+        for a in assets:
+            n = a.get("name", "")
+            if n.endswith(".tar.xz") and "proton" in n.lower():
+                archive = a
+                break
+    return archive, None
 
 
 def github_to_releases(source: str, data: list[dict], picker) -> list[Release]:
@@ -135,11 +209,12 @@ def github_to_releases(source: str, data: list[dict], picker) -> list[Release]:
     return out
 
 
-def forgejo_to_releases(source: str, data: list[dict]) -> list[Release]:
+def forgejo_to_releases(source: str, data: list[dict], picker=None) -> list[Release]:
+    pick = picker or pick_dwproton_asset
     out: list[Release] = []
     for r in data:
         assets = r.get("assets", [])
-        archive, checksum = pick_dwproton_asset(
+        archive, checksum = pick(
             [{"name": a.get("name", ""), "size": a.get("size", 0),
               "browser_download_url": a.get("browser_download_url", "")} for a in assets]
         )

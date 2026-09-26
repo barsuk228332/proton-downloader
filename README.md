@@ -8,12 +8,15 @@
 
 ## ✨ Возможности
 
-- 📦 **3 источника** в одном окне: Proton-GE, Proton-CachyOS, DWProton
+- 📦 **6 источников** в одном окне: Proton-GE, Proton-CachyOS, DWProton, Proton-Sarek, Luxtorpeda, Kron4ek-Proton
 - 🔍 Поиск по версии и сортировка (новые / старые / по размеру)
 - 🏷️ Бейджи **Latest** (свежайший релиз) и **Installed** (уже установлен)
-- 📥 Скачивание с прогрессом и проверкой контрольной суммы **SHA512**
-- 📁 Установка в папку Steam или в любой свой путь
-- 🗑️ Удаление установленных сборок прямо из интерфейса
+- 📜 Кнопка «Что нового» — changelog релиза прямо в карточке
+- 📥 Скачивание с прогрессом, скоростью, ETA, паузой-докачкой (Resume) и кнопкой отмены
+- ✅ Проверка контрольной суммы **SHA512** (где публикует автор)
+- 📁 Установка в папку Steam, по прямому URL или в любой свой путь
+- 🗑️ Удаление установленных сборок, счётчик места, авточистка «держать N последних»
+- 🔑 GitHub-токен в настройках против rate-limit + кэш списка при офлайне
 - 💻 Есть CLI-режим без GUI
 
 ## 📦 Источники сборок
@@ -23,6 +26,9 @@
 | **Proton-GE** | [GloriousEggroll/proton-ge-custom](https://github.com/GloriousEggroll/proton-ge-custom) | `GE-Proton*-x86_64.tar.gz` |
 | **Proton-CachyOS** | [CachyOS/proton-cachyos](https://github.com/CachyOS/proton-cachyos) | `proton-cachyos-*-x86_64.tar.xz` |
 | **DWProton** | [dawn-winery/dwproton](https://dawn.wine/dawn-winery/dwproton) | `dwproton-*-x86_64.tar.xz` |
+| **Proton-Sarek** | [pythonlover02/Proton-Sarek](https://github.com/pythonlover02/Proton-Sarek) | `Proton-Sarek*.tar.gz` (для старых GPU, без async-варианта) |
+| **Luxtorpeda** | [luxtorpeda/luxtorpeda](https://codeberg.org/luxtorpeda/luxtorpeda) | `luxtorpeda-*.tar.xz` (нативные движки) |
+| **Kron4ek-Proton** | [Kron4ek/Wine-Builds](https://github.com/Kron4ek/Wine-Builds) | `wine-proton-*-amd64-wow64.tar.xz` (без SHA-проверки) |
 
 Архитектура выбирается автоматически (`x86_64` / `aarch64`).
 Для CachyOS по умолчанию ставится обычный `x86_64` — так рекомендует сам мейнтейнер.
@@ -89,6 +95,13 @@ python3 -m venv .venv
 
 # установить в свою папку
 .venv/bin/python main.py --cli-install GE-Proton11-7 ~/my-protons
+
+# установить по прямой ссылке на архив
+.venv/bin/python main.py --cli-install-url https://example.com/foo.tar.xz ~/my-protons
+
+# оставить N самых новых сборок, остальные удалить
+.venv/bin/python main.py --cli-prune 3
+.venv/bin/python main.py --cli-prune ~/my-protons 3
 ```
 
 ## 📁 Куда ставится
@@ -122,12 +135,13 @@ DWProton (Forgejo) при этом продолжает работать.
 ```
 proton-downloader/
 ├── main.py            # точка входа (GUI + CLI)
-├── gui.py             # главное окно: сайдбар + карточки
-├── widgets.py         # виджет карточки релиза
-├── fetcher.py         # загрузка списков релизов (GitHub / Forgejo)
+├── gui.py             # главное окно: сайдбар + карточки + настройки
+├── widgets.py         # виджет карточки релиза (changelog, скорость/ETA)
+├── fetcher.py         # загрузка списков релизов (GitHub / Forgejo) + кэш
 ├── sources.py         # модель Release + выбор архива под архитектуру
-├── downloader.py      # скачивание с прогрессом + проверка SHA512
-├── installer.py       # распаковка в compatibilitytools.d, удаление
+├── downloader.py      # скачивание с прогрессом, докачкой, отменой + SHA512
+├── installer.py       # распаковка с прогрессом, удаление, авточистка
+├── settings.py        # настройки (токен, keep-N) + кэш в ~/.cache
 ├── requirements.txt
 └── dist/              # готовая сборка PyInstaller
 ```

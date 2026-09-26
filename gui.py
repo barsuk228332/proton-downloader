@@ -2,18 +2,24 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QSplitter, QStatusBar, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QStatusBar, QVBoxLayout, QWidget,
 )
 
-from downloader import download, fetch_expected_sha512, verify_sha512
-from fetcher import SOURCES, fetch_all
-from installer import default_install_dir, extract_archive, list_installed, remove_build
+from downloader import DownloadCancelled, download, fetch_expected_sha512, verify_sha512
+from fetcher import SOURCES, fetch_all, load_cached_releases
+from installer import (
+    InstallCancelled, cleanup_archive, default_install_dir, dir_size, extract_archive,
+    installed_total_size, list_installed, prune_old_builds, remove_build,
+)
+from settings import load_settings, save_settings
 from sources import Release
 from widgets import ReleaseCard
 
@@ -47,41 +53,90 @@ class FetchWorker(QThread):
         try:
             self.done.emit(fetch_all(self.limit))
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
+            cached = load_cached_releases()
+            if cached and sum(len(v) for v in cached.values()):
+                self.done.emit(cached)
+            else:
+                self.failed.emit(str(e))
 
 
 class DownloadWorker(QThread):
-    progress = Signal(int, int)
-    done = Signal(str)
+    progress = Signal(int, int, float, float)  # done, total, speed_bps, eta_s (-1 = ?)
+    extract_progress = Signal(int, int)
+    phase = Signal(str)
+    done = Signal(object)  # {"target": str, "pruned": list}
     failed = Signal(str)
+    cancelled = Signal()
 
-    def __init__(self, release: Release, install_dir: Path):
+    def __init__(self, release: Release, install_dir: Path,
+                 delete_archive: bool = True, keep_n: int = 0):
         super().__init__()
         self.release = release
         self.install_dir = install_dir
+        self.delete_archive = delete_archive
+        self.keep_n = keep_n
 
     def run(self):
         try:
             tmp = Path(tempfile.gettempdir()) / "proton-downloader"
             tmp.mkdir(parents=True, exist_ok=True)
-            archive = tmp / self.release.url.split("/")[-1]
-            download(self.release.url, archive,
-                     progress=lambda d, t: self.progress.emit(d, t))
+            fname = self.release.url.split("/")[-1].split("?")[0] or "proton-archive"
+            archive = tmp / fname
+            self.phase.emit("Скачивание…")
+            t0 = time.monotonic()
+            # первичное уведомление чтобы показать бар сразу
+            self.progress.emit(0, self.release.size or 0, 0.0, -1.0)
+
+            def _prog(d: int, t: int):
+                el = max(time.monotonic() - t0, 0.01)
+                speed = d / el
+                eta = (t - d) / speed if t and speed > 0 else -1.0
+                self.progress.emit(d, t, speed, eta)
+
+            try:
+                download(self.release.url, archive, progress=_prog,
+                         is_cancelled=self.isInterruptionRequested)
+            except DownloadCancelled:
+                self.cancelled.emit()
+                return
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
             if self.release.checksum_url:
+                self.phase.emit("Проверка SHA512…")
                 expected = fetch_expected_sha512(self.release.checksum_url)
                 if expected and not verify_sha512(archive, expected):
                     self.failed.emit("SHA512 mismatch — файл повреждён")
                     return
-            target = extract_archive(archive, self.install_dir)
-            self.done.emit(str(target))
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
+            self.phase.emit("Распаковка…")
+            try:
+                target = extract_archive(
+                    archive, self.install_dir,
+                    progress=lambda d, t: self.extract_progress.emit(d, t),
+                    is_cancelled=self.isInterruptionRequested)
+            except InstallCancelled:
+                self.cancelled.emit()
+                return
+            if self.delete_archive:
+                cleanup_archive(archive)
+            pruned: list[str] = []
+            if self.keep_n > 0:
+                pruned = prune_old_builds(self.install_dir, self.keep_n)
+            self.done.emit({"target": str(target), "pruned": pruned})
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+            else:
+                self.failed.emit(str(e))
 
 
 def possible_dir_names(r: Release) -> set[str]:
     """Candidate installed-folder names for a release (lowercased)."""
     out = {r.tag.lower()}
-    fname = r.url.split("/")[-1]
+    fname = r.url.split("/")[-1].split("?")[0]
     for suffix in (".tar.gz", ".tgz", ".tar.xz", ".tar.bz2"):
         if fname.endswith(suffix):
             fname = fname[: -len(suffix)]
@@ -92,6 +147,38 @@ def possible_dir_names(r: Release) -> set[str]:
         if fname.lower().endswith(arch):
             out.add(fname[: -len(arch)].lower())
     return out
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки")
+        s = load_settings()
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("GitHub-токен (для снятия rate-limit 60/час):"))
+        self.token = QLineEdit(s.get("github_token", ""))
+        self.token.setEchoMode(QLineEdit.Password)
+        self.token.setPlaceholderText("ghp_… (пусто = без токена)")
+        lay.addWidget(self.token)
+        lay.addWidget(QLabel("Держать сборок максимум (0 = без лимита):"))
+        self.keep = QSpinBox()
+        self.keep.setRange(0, 50)
+        self.keep.setValue(int(s.get("keep_n", 0)))
+        lay.addWidget(self.keep)
+        self.del_arch = QCheckBox("Удалять архив после установки")
+        self.del_arch.setChecked(bool(s.get("delete_archive_after_install", True)))
+        lay.addWidget(self.del_arch)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def values(self) -> dict:
+        s = load_settings()
+        s["github_token"] = self.token.text().strip()
+        s["keep_n"] = int(self.keep.value())
+        s["delete_archive_after_install"] = bool(self.del_arch.isChecked())
+        return s
 
 
 class MainWindow(QMainWindow):
@@ -105,13 +192,14 @@ class MainWindow(QMainWindow):
         self.cards: dict[str, ReleaseCard] = {}  # key = source+tag
         self.worker: QThread | None = None
         self.active_card: ReleaseCard | None = None
+        self.active_release: Release | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setSpacing(8)
 
-        # top bar: search + sort + refresh
+        # top bar: search + sort + refresh + url + settings
         top = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setObjectName("Search")
@@ -125,6 +213,13 @@ class MainWindow(QMainWindow):
         self.refresh_btn = QPushButton("Обновить")
         self.refresh_btn.clicked.connect(self.refresh)
         top.addWidget(self.refresh_btn)
+        self.url_btn = QPushButton("По URL…")
+        self.url_btn.setToolTip("Установить сборку по прямой ссылке на .tar.gz/.tar.xz")
+        self.url_btn.clicked.connect(self.install_by_url)
+        top.addWidget(self.url_btn)
+        self.settings_btn = QPushButton("Настройки")
+        self.settings_btn.clicked.connect(self.open_settings)
+        top.addWidget(self.settings_btn)
         root.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
@@ -148,6 +243,23 @@ class MainWindow(QMainWindow):
         browse.clicked.connect(self.browse_dir)
         dir_row.addWidget(browse)
         side_layout.addLayout(dir_row)
+        self.disk_label = QLabel("")
+        self.disk_label.setObjectName("CardMeta")
+        side_layout.addWidget(self.disk_label)
+        # prune row
+        prune_row = QHBoxLayout()
+        prune_row.addWidget(QLabel("Держать:"))
+        self.keep_spin = QSpinBox()
+        self.keep_spin.setRange(0, 50)
+        self.keep_spin.setValue(int(load_settings().get("keep_n", 0)))
+        self.keep_spin.setToolTip("0 = без лимита")
+        self.keep_spin.valueChanged.connect(self._keep_changed)
+        prune_row.addWidget(self.keep_spin)
+        self.prune_btn = QPushButton("Почистить")
+        self.prune_btn.setToolTip("Удалить старые сборки, оставив N самых новых")
+        self.prune_btn.clicked.connect(self.prune_now)
+        prune_row.addWidget(self.prune_btn)
+        side_layout.addLayout(prune_row)
         split.addWidget(side_box)
 
         # cards scroll area
@@ -176,18 +288,25 @@ class MainWindow(QMainWindow):
     # --- data ---
     def refresh(self):
         self.refresh_btn.setEnabled(False)
+        # мгновенно показать кэш, если есть, затем обновить из сети
+        cached = load_cached_releases()
+        if cached and not self.by_source:
+            self.on_fetched(cached, cached_note=True)
         self.statusbar.showMessage("Загрузка списка…")
         self.worker = FetchWorker()
-        self.worker.done.connect(self.on_fetched)
+        self.worker.done.connect(lambda d: self.on_fetched(d))
         self.worker.failed.connect(self.on_fetch_failed)
         self.worker.start()
 
-    def on_fetched(self, data: dict):
+    def on_fetched(self, data: dict, cached_note: bool = False):
         self.by_source = data
         self.latest_tags = {v[0].tag for v in data.values() if v}
         self.refresh_btn.setEnabled(True)
         total = sum(len(v) for v in data.values())
-        self.statusbar.showMessage(f"Найдено релизов: {total}")
+        msg = f"Найдено релизов: {total}"
+        if cached_note:
+            msg += " (кэш, обновление…)"
+        self.statusbar.showMessage(msg)
         self.rebuild_sidebar()
         self.rebuild_cards()
 
@@ -241,6 +360,11 @@ class MainWindow(QMainWindow):
                                is_installed=installed)
             card.install_clicked.connect(self.install_release)
             card.remove_clicked.connect(self.remove_release)
+            card.cancel_clicked.connect(self.cancel_active)
+            if self.active_release and r.source == self.active_release.source \
+                    and r.tag == self.active_release.tag:
+                self.active_card = card
+                card.set_busy(True, "Скачивание…")
             key = f"{r.source}\0{r.tag}"
             self.cards[key] = card
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
@@ -260,35 +384,113 @@ class MainWindow(QMainWindow):
     def reload_installed(self):
         try:
             names = list_installed(self.install_dir())
+            total = installed_total_size(self.install_dir())
         except Exception:  # noqa: BLE001
             names = []
+            total = 0
         self.installed = {n.lower() for n in names}
+        mb = total / 1024 / 1024
+        self.disk_label.setText(f"Установлено: {len(names)} · {mb:.0f} МБ")
         if self.cards:
             self.rebuild_cards()
 
-    # --- actions ---
-    def install_release(self, r: Release):
-        if self.active_card is not None:
-            QMessageBox.information(self, "Подождите", "Уже идёт загрузка.")
+    def _keep_changed(self, v: int):
+        s = load_settings()
+        s["keep_n"] = int(v)
+        save_settings(s)
+
+    def prune_now(self):
+        n = int(self.keep_spin.value())
+        if n <= 0:
+            QMessageBox.information(self, "Очистка",
+                                    "Укажите «Держать» > 0 (сколько новых сборок оставить).")
             return
-        key = f"{r.source}\0{r.tag}"
+        names = list_installed(self.install_dir())
+        if len(names) <= n:
+            QMessageBox.information(self, "Очистка", "Чистить нечего — сборок не больше лимита.")
+            return
+        if QMessageBox.question(
+                self, "Очистка",
+                f"Оставить {n} самых новых, остальные {len(names) - n} удалить?") != QMessageBox.Yes:
+            return
+        pruned = prune_old_builds(self.install_dir(), n)
+        self.reload_installed()
+        self.statusbar.showMessage(f"Удалено старых сборок: {len(pruned)}")
+
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            save_settings(dlg.values())
+            self.keep_spin.setValue(int(dlg.values().get("keep_n", 0)))
+            self.statusbar.showMessage("Настройки сохранены")
+
+    def install_by_url(self):
+        url, ok = QInputDialog.getText(self, "Установка по URL",
+                                       "Прямая ссылка на .tar.gz / .tar.xz:")
+        if not ok or not url.strip():
+            return
+        url = url.strip()
+        fname = url.split("/")[-1].split("?")[0]
+        if not fname.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+            QMessageBox.warning(self, "URL", "Нужна ссылка на архив .tar.gz / .tar.xz")
+            return
+        tag = fname
+        for suffix in (".tar.gz", ".tgz", ".tar.xz", ".tar.bz2"):
+            if tag.endswith(suffix):
+                tag = tag[: -len(suffix)]
+                break
+        r = Release(source="URL", tag=tag, name=tag, url=url, size=0,
+                    checksum_url=None, published_at="", body="")
+        self.install_release(r, card_key=None)
+
+    # --- actions ---
+    def install_release(self, r: Release, card_key: str | None = None):
+        if isinstance(self.worker, DownloadWorker) and self.worker.isRunning():
+            QMessageBox.information(self, "Подождите", "Уже идёт загрузка. Отмените её для новой.")
+            return
+        key = card_key or f"{r.source}\0{r.tag}"
         card = self.cards.get(key)
         self.active_card = card
+        self.active_release = r
+        s = load_settings()
+        if card:
+            card.set_busy(True, "Скачивание…")
         self.refresh_btn.setEnabled(False)
-        self.worker = DownloadWorker(r, self.install_dir())
-        self.worker.progress.connect(
-            lambda d, t: card.set_progress(d, t) if card else None)
-        self.worker.done.connect(lambda target: self.on_installed(target, r))
+        self.worker = DownloadWorker(r, self.install_dir(),
+                                     delete_archive=bool(s.get("delete_archive_after_install", True)),
+                                     keep_n=int(s.get("keep_n", 0)))
+        if card:
+            self.worker.progress.connect(
+                lambda d, t, sp, eta: (card.set_progress(d, t, sp, eta if eta >= 0 else None),
+                                       self.statusbar.showMessage(f"Скачивание {r.tag}…")))
+            self.worker.extract_progress.connect(card.set_extract_progress)
+            self.worker.phase.connect(card.set_phase)
+        else:
+            self.worker.progress.connect(
+                lambda d, t, sp, eta: self.statusbar.showMessage(f"Скачивание {r.tag}…"))
+        self.worker.done.connect(lambda info: self.on_installed(info, r))
         self.worker.failed.connect(self.on_install_failed)
+        self.worker.cancelled.connect(lambda: self.on_install_cancelled(r))
         self.statusbar.showMessage(f"Скачивание {r.tag}…")
         self.worker.start()
 
-    def on_installed(self, target: str, r: Release):
+    def cancel_active(self, _r: Release | None = None):
+        if isinstance(self.worker, DownloadWorker) and self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.statusbar.showMessage("Отмена…")
+
+    def on_installed(self, info: object, r: Release):
+        target = info.get("target", "") if isinstance(info, dict) else str(info)
+        pruned = info.get("pruned", []) if isinstance(info, dict) else []
         self.refresh_btn.setEnabled(True)
         if self.active_card:
             self.active_card.clear_progress()
         self.active_card = None
-        self.statusbar.showMessage(f"Установлено: {target}")
+        self.active_release = None
+        msg = f"Установлено: {target}"
+        if pruned:
+            msg += f" (удалено старых: {len(pruned)})"
+        self.statusbar.showMessage(msg)
         QMessageBox.information(self, "Готово",
                                 f"Установлено в:\n{target}\n\nПерезапустите Steam.")
         self.reload_installed()
@@ -298,8 +500,18 @@ class MainWindow(QMainWindow):
         if self.active_card:
             self.active_card.clear_progress()
         self.active_card = None
+        self.active_release = None
         self.statusbar.showMessage("Ошибка установки")
         QMessageBox.critical(self, "Ошибка", err)
+
+    def on_install_cancelled(self, r: Release):
+        self.refresh_btn.setEnabled(True)
+        if self.active_card:
+            self.active_card.clear_progress()
+        self.active_card = None
+        self.active_release = None
+        self.statusbar.showMessage(f"Отменено: {r.tag}")
+        self.reload_installed()
 
     def remove_release(self, r: Release):
         cands = possible_dir_names(r) & self.installed
@@ -315,7 +527,12 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(self, "Удалить", f"Удалить {real}?") != QMessageBox.Yes:
             return
+        try:
+            sz = dir_size(self.install_dir() / real)
+        except Exception:
+            sz = 0
         remove_build(self.install_dir(), real)
+        self.statusbar.showMessage(f"Удалено {real} ({sz / 1024 / 1024:.0f} МБ)")
         self.reload_installed()
 
 
